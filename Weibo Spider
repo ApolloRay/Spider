@@ -1,0 +1,242 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Sun Jul  1 10:29:49 2018
+
+@author: Apollo
+"""
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+
+#python3运行，谢谢~
+
+import requests
+import json
+import pandas as pd
+import urllib.request
+from urllib.parse import quote
+import time
+import random
+
+#设置代理IP
+proxy_addr = "122.241.72.191:808"
+#去除关键词内url中不允许出现的异常字符，如空格
+def url_encoding(keywords):
+    keywords_list = []
+    for country in keywords:
+        url_word = quote(country)
+        keywords_list.append(url_word)
+    return keywords_list
+
+#对每一个关键词，进行pages页的搜索，返回所有搜索页的url_list
+def create_url_list(keywords,pages):
+    url_list = []
+    for country in keywords:
+        general_url = "https://m.weibo.cn/api/container/getIndex?containerid=100103type%3D1%26q%3D"+country+"&page_type=searchall&page="
+        for i in range(pages):
+            this_url = general_url+str(i+1)
+            url_list.append(this_url)
+    return url_list
+
+#搜索获得url
+def search_by_keyword(keywords,pages):
+    urlencoded_search = url_encoding(keywords)
+    url_list = create_url_list(urlencoded_search,pages)
+    return url_list
+
+#定义页面打开函数，参考上课案例
+def use_proxy(url,proxy_addr):
+    req=urllib.request.Request(url)
+    req.add_header("User-Agent","Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/49.0.2623.221 Safari/537.36 SE 2.X MetaSr 1.0")
+    proxy=urllib.request.ProxyHandler({'http':proxy_addr})
+    opener=urllib.request.build_opener(proxy,urllib.request.HTTPHandler)
+    urllib.request.install_opener(opener)
+    data=urllib.request.urlopen(req).read().decode('utf-8','ignore')
+    return data
+
+#以"用户名: 内容”显示爬取结果
+def author_n_words(data):
+    text = data.get('text')
+    author = data.get('user').get('screen_name')
+    author_n_words = author+': '+text
+    return author_n_words
+    
+
+#获得某一条微博的前十条评论（小于十条则获得所有）comment，及每条评论的前两条回复comment_reply
+#并将数据按照csv输出格式对齐（四列：微博博文，评论数，评论，回复评论）
+#注：1.评论数是评论和评论的回复的数量总和
+#    2.由于微博可能删除被举报的评论，但评论数并不减少，所以评论数<=真实评论数
+#    3.大约2011、2012年的微博，评论界面发出get请求的url和现在的不一样（以前使用page翻页，现在使用上一页的max_id属性加入下一页的url）
+#      由于版本不同，多年前的评论可能爬取不到，再csv文件中显示为有较多的评论数，但实际爬取评论数为0，这种情况比较少
+def get_comment(mid,comments_number):
+    comment = []
+    comment_reply = []
+    crawled_comment_count = 0
+    #如果评论数为0，该页面返回的json中不包含‘data’，将会报错，所以直接将此条微薄的评论返回为空
+    if comments_number == 0:
+        print("xxx评论爬取失败，该微博无评论，微博id：",mid,"xxx")
+        comment.append(' ')
+        comment_reply.append(' ')
+        return crawled_comment_count,comment,comment_reply
+    else:
+        #尝试获得评论页面的json
+        try:
+            #m端的微博评论机制是，每条微博对应一个固定id，将此id加在”https://m.weibo.cn/status/“之后即可进入该微薄的评论界面
+            #本url_indi返回的是网页发出get请求后，得到的对应该评论界面的respond，为json格式
+            #如果返回的json文件不包含'data'则必然不包含我们要的评论
+            url_indi = "https://m.weibo.cn/comments/hotflow?id=%s&mid=%s&max_id_type=0" %(mid,mid)
+            #indi_data = requests.get(url_indi).text
+            indi_data = use_proxy(url_indi,proxy_addr)
+            content = json.loads(str(indi_data))
+            data_all = content.get('data')
+            data_comment = data_all.get('data')
+        #第一种错误：评论数不为0，但由于微博或评论者删除了评论，进入评论界面后实际并没有评论，所以无法get('data')
+        except AttributeError:
+            print("xxx评论爬取失败，评论已被删除，微博id：",mid,"xxx")
+            comment.append(' ')
+            comment_reply.append(' ')
+            return crawled_comment_count,comment,comment_reply
+        #其他未知错误，返回报错内容
+        except Exception as result:
+            print("xxx评论爬取失败，未知错误: %s，微博id："%result,mid,"xxx")
+            comment.append(' ')
+            comment_reply.append(' ')
+            return crawled_comment_count,comment,comment_reply
+        #无异常，继续爬取
+        else:
+            #获得评论内容，以"用户名: 评论内容”显示，其中@用户、微博表情等会以html的格式显示，存入评论的list
+            for i in range(len(data_comment)):
+                one_comment = author_n_words(data_comment[i])
+                comment.append(one_comment)
+                crawled_comment_count+=1
+                #获取评论的回复，若该评论没有回复，则返回None
+                comment_reply_indi = data_comment[i].get('comments')
+                #有回复，则获得回复的评论内容，以"用户名: 评论内容”显示，其中@用户、微博表情等会以html的格式显示，存入回复评论的list
+                if comment_reply_indi :
+                    for j in range(len(comment_reply_indi)):
+                        one_comment_reply = author_n_words(comment_reply_indi[j])
+                        comment_reply.append(one_comment_reply)
+                        crawled_comment_count+=1
+                        #为在csv中行数对应，在评论列添加空行
+                        if j>0 :
+                            comment.append(' ')
+                #无回复，为在csv中行数对应，在回复评论列添加空行
+                else:
+                    comment_reply.append(' ')
+            #完成一条微博的所有评论的爬取
+            print("---爬取本条微博评论成功，微博id：",mid,"---")
+            return crawled_comment_count,comment,comment_reply
+
+
+#获得每条微博的博文，评论数，评论，回复评论，并按格式循环写入csv文件中
+def get_weibo(url_list):
+    crawl_result = []
+    crawled_mid = []
+    for url in url_list:
+        print("正在爬取搜索页：",url[-2:])
+        #对每条经过添加处理过的关键词的url尝试获取页面的json
+        try:
+            #wb_data = requests.get(url).text
+            wb_data = use_proxy(url,proxy_addr)
+            content = json.loads(str(wb_data))
+            #将json原始结果追加写入txt文件（作业要求的”爬取获得网页源数据“）
+            requests_get_txt(str(content))
+            data = content.get('data')
+            cards = data.get('cards')
+            len_cards = len(cards)
+        #1.若cards返回为None，len函数将报错
+        #2.page过大，仍可以通过get请求，但实际已经无搜索结果，返回的json可能由于无法正常编码而报错
+            #由于url_list中后面的关键词会从第一页开始搜索，所以跳过有问题的url直到进入下一个关键词
+            #但是实际爬取时发现大量报错，应适当调小参数pages
+            #由于不管page多大，网页都能发出get请求并返回json，返回的json可能包含‘data‘但无博文，也可能无法编码，情况复杂，所以没有成功写出获取最大pages的函数（经验为100页左右）
+        #3.若ip地址被封无法进入网页，此处会报错
+        except Exception as result:
+            print("xxx本页爬取失败，未知错误: %s"%result,"xxx")
+            continue
+        #寻找搜索页面json中的微博，判断条件为'card_type'
+        #若完成所有i循环均没有找到微博的card_type，说明该搜索页已无更多微博，但仍然返回了json结果
+        else:
+            for i in range(len_cards):
+                card = cards[i]
+                if card['card_type']==11:
+                    for j in range(len(card.get('card_group'))):
+                        card_group = card.get('card_group')[j]
+                        if card_group['card_type']==9:
+                            mblog = card_group.get('mblog')
+                            #即获得微博评论页需要的微博id
+                            mid = mblog.get('id')
+                            if mid in crawled_mid:
+                                print("***本条微博已爬取过***")
+                                continue
+                            else:
+                                crawled_mid.append(mid)
+                                print("***本条微博爬取成功***")
+                                #获得评论数
+                                comments_count = []
+                                comments_number = mblog.get('comments_count')
+                                comments_count.append(comments_number)
+                                #获得评论和回复评论
+                                crawled_comment_count,comment, comment_reply = get_comment(mid,comments_number)
+                                crawled_count=[]
+                                crawled_count.append(crawled_comment_count)
+                                #获得博文，以"用户名: 微博内容”的格式显示
+                                weibo = []
+                                one_weibo = author_n_words(mblog)
+                                weibo.append(one_weibo)
+                                #为在csv中行数对应，在微博列和评论数列添加空行
+                                for k in range(len(comment_reply)):
+                                    if len(weibo)<len(comment_reply):
+                                        weibo.append(' ')
+                                    if len(comments_count)<len(comment_reply):
+                                        comments_count.append(' ')
+                                    if len(crawled_count)<len(comment_reply):
+                                        crawled_count.append(' ')
+                                #利用pandas中的DataFrame追加写入csv文件，追加时不显示行名和列名，列名在创建文件时写入，定义在主函数中
+                                temp = {'weibo':weibo,'comments_count':comments_count,'crawled_comment_count':crawled_count,'comment':comment,'comment_reply':comment_reply}  
+                                df = pd.DataFrame(temp,columns = ['weibo','comments_count','crawled_comment_count','comment','comment_reply'])
+                                df.to_csv("weibo.csv",mode ='a', encoding ='utf-8-sig',index=False,header=False)
+                                #temp = [weibo,comments_count,comment,comment_reply]
+                                crawl_result.append(temp)
+                                time.sleep(random.randint(1,3))#防止ip被封
+
+                    
+    return crawl_result
+
+'''
+#原本封装了函数来一次性输出csv文件，但由于如果程序运行中途报错，将无数据存入，所以将csv以追加写入的形式写进了上一个函数                        
+def write_list_to_csv(result):
+    
+    DF = pd.DataFrame(columns = ['weibo','comments_count','first_10_comment','comment_reply'])
+    DF.to_csv("weibo.csv",mode='w',index=False,encoding ='utf-8-sig')
+    for item in result:
+        df = pd.DataFrame(item,columns = ['weibo','comments_count','comment','comment_reply'])
+        df.to_csv("weibo.csv",mode ='a', encoding ='utf-8-sig',index=False,header=False)
+'''
+
+#将json写入txt文件，并存入当前路径文件夹中
+#！！！注意：请将代码存入一个可找到的，路径为英文的，非C盘的文件夹中，否则输出的txt文件可能无法保存！！！
+def  requests_get_txt(data):
+    file = open('requests_get_txt.txt','a')
+    #json中可能存在异常字符，使用replace将它们都替换成?，先encode再decode是因为write函数的参数必须是str
+    code_data = data.encode('gbk','replace').decode('gbk','replace')
+    file.write(code_data)
+    file.close()
+        
+    
+    
+#主函数
+#可改变量：keywords:数量不限，我们爬了约10个关键词。注：务必为bytes，而不能为str，否则quote函数报错，无法去除空格。
+#         pages：对所有关键词均搜索pages页，实际页数为len(keywords)*pages，我们爬的时候设置的是pages=100
+#重新爬取前请先关闭csv和txt文件（无需删除，自动清空）
+if __name__ == "__main__":
+    keywords = ['房价']#'楼市','中国房价','房价 成都','房价 北京 四合院','房价 一线城市','房价走势 预测 分析','商品房价格','炒房','房地产市场分析']
+    pages =1 #max=100
+    DF = pd.DataFrame(columns = ['weibo','comments_count','crawled_comment_count','comment','comment_reply'])
+    DF.to_csv("weibo.csv",mode='w',index=False,encoding ='utf-8-sig')
+    file = open('requests_get_txt.txt','w')
+    file.write("A new try:")
+    file.close()
+    url_list = search_by_keyword(keywords,pages)
+    crawl_result=get_weibo(url_list)
+    #write_list_to_csv(crawl_result)
